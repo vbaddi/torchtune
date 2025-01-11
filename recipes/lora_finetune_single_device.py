@@ -17,6 +17,7 @@ import torchtune.modules.common_utils as common_utils
 from omegaconf import DictConfig, ListConfig
 
 from torch import nn
+from torch.amp import GradScaler
 from torch.optim import Optimizer
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torchdata.stateful_dataloader.sampler import StatefulDistributedSampler
@@ -514,7 +515,8 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
             last_epoch=last_epoch,
         )
 
-        self._logger.info("Learning rate scheduler is initialized.")
+        log.info("Learning rate scheduler is initialized.")
+        log.info(f"Device type is {self._device.type}")
         return lr_scheduler
 
     def _setup_data(
@@ -641,10 +643,11 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         # run model
         with self.activations_handling_ctx:
             with (
-                torch.autocast(device_type=self._device, dtype=torch.float16)
-                if self._useautocast
+                torch.autocast(device_type=self._device.type, dtype=torch.float16)
+                if self._device.type == "qaic"
                 else nullcontext()
             ):
+                # log.info(f"Enabled Autocast for QAic {self._device.type} and {self._useautocast}")
                 logits = self._model(**batch)
 
         if self.linear_loss:
@@ -675,6 +678,14 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         running_loss = 0
         num_tokens = 0
 
+        grad_scalar = False
+        if self._device.type == "qaic":
+            log.info(
+                "NOTE: torch.qaic is enabled and model is expected to be trained on fp16, enabling the GradScalar() computation"
+            )
+            scaler = GradScaler()
+            grad_scalar = True
+
         with self._profiler as prof:
             # self.epochs_run should be non-zero when we're resuming from a checkpoint
             for curr_epoch in range(self.epochs_run, self.total_epochs):
@@ -703,7 +714,10 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
                     # This way we can normalize by the total number of tokens if we're accumulating gradients
                     current_loss = self._loss_step(batch) * current_num_tokens
                     running_loss += current_loss
-                    current_loss.backward()
+                    if grad_scalar:
+                        scaler.scale(current_loss).backward()
+                    else:
+                        current_loss.backward()
 
                     # Step with optimizer
                     if (idx + 1) % self._gradient_accumulation_steps == 0:
@@ -713,7 +727,11 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
                                 self._model.parameters(),
                                 max_norm=float(self._clip_grad_norm),
                             )
-                        self._optimizer.step()
+                        if grad_scalar:
+                            scaler.step(self._optimizer)
+                            scaler.update()
+                        else:
+                            self._optimizer.step()
                         self._optimizer.zero_grad(set_to_none=True)
                         self._lr_scheduler.step()
                         # Update the number of steps when the weights are updated
