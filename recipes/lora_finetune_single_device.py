@@ -6,6 +6,7 @@
 
 import sys
 import time
+from contextlib import nullcontext
 
 from functools import partial
 from typing import Any, Dict, Optional, Union
@@ -125,10 +126,13 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         self._dtype = training.get_dtype(cfg.dtype, device=self._device)
         # fp16 precision is explicitly disabled as it is not supported in this
         # recipe (for example, no gradient scaling).
-        if self._dtype == torch.float16:
-            raise ValueError(
-                "fp16 precision is not supported in this recipe. Please use fp32 or bf16."
-            )
+
+        # TODO: vbaddi: FIX ME
+        self._useautocast = True
+        # if self._dtype == torch.float16 and self._device != "qaic":
+        #     raise ValueError(
+        #         "fp16 precision is not supported in this recipe. Please use fp32 or bf16."
+        #     )
 
         # logging attributes
         self._output_dir = cfg.output_dir
@@ -255,7 +259,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         self._metric_logger.log_config(cfg)
 
         self._compile = cfg.compile
-        if cfg.device == "npu" and cfg.compile:
+        if cfg.device == ("npu" or "qaic") and cfg.compile:
             raise ValueError(
                 "NPU does not support model compilation. Please set `compile: False` in the config."
             )
@@ -636,7 +640,12 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         labels = batch.pop("labels")
         # run model
         with self.activations_handling_ctx:
-            outputs = self._model(**batch)
+            with (
+                torch.autocast(device_type=self._device, dtype=torch.float16)
+                if self._useautocast
+                else nullcontext()
+            ):
+                logits = self._model(**batch)
 
         if self.linear_loss:
             weight = self._model.linear_projection_weight

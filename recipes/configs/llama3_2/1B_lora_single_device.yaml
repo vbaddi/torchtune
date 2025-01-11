@@ -21,9 +21,9 @@ output_dir: /tmp/torchtune/llama3_2_1B/lora_single_device # /tmp may be deleted 
 model:
   _component_: torchtune.models.llama3_2.lora_llama3_2_1b
   lora_attn_modules: ['q_proj', 'v_proj', 'output_proj']
-  apply_lora_to_mlp: True
-  lora_rank: 64  # higher increases accuracy and memory
-  lora_alpha: 128  # usually alpha=2*rank
+  apply_lora_to_mlp: False
+  lora_rank: 8  # higher increases accuracy and memory
+  lora_alpha: 16  # usually alpha=2*rank
   lora_dropout: 0.0
 
 # Tokenizer
@@ -46,16 +46,16 @@ save_adapter_weights_only: False
 
 # Dataset and Sampler
 dataset:
-  _component_: torchtune.datasets.alpaca_cleaned_dataset
+  _component_: torchtune.datasets.samsum_dataset
   packed: False  # True increases speed
 seed: null
 shuffle: True
-batch_size: 4
+batch_size: 1
 
 # Optimizer and Scheduler
 optimizer:
   _component_: torch.optim.AdamW
-  fused: True
+  fused: False
   weight_decay: 0.01
   lr: 3e-4
 lr_scheduler:
@@ -68,8 +68,7 @@ loss:
 # Training
 epochs: 1
 max_steps_per_epoch: null
-gradient_accumulation_steps: 8  # Use to increase effective batch size
-clip_grad_norm: null
+gradient_accumulation_steps: 4  # Use to increase effective batch size
 compile: False  # torch.compile the model + loss, True increases speed + decreases memory
 
 # Logging
@@ -77,12 +76,11 @@ metric_logger:
   _component_: torchtune.training.metric_logging.DiskLogger
   log_dir: ${output_dir}/logs
 log_every_n_steps: 1
-log_peak_memory_stats: True
-log_level: INFO  # DEBUG, WARN, etc.
+log_peak_memory_stats: False
 
 # Environment
-device: cuda
-dtype: bf16
+device: qaic
+dtype: fp16
 
 # Activations Memory
 enable_activation_checkpointing: False  # True reduces memory
@@ -98,8 +96,8 @@ profiler:
   output_dir: ${output_dir}/profiling_outputs
 
   #`torch.profiler.ProfilerActivity` types to trace
-  cpu: True
-  cuda: True
+  cpu: False
+  cuda: False
 
   #trace options passed to `torch.profiler.profile`
   profile_memory: False
