@@ -6,6 +6,7 @@
 
 import sys
 import time
+from contextlib import nullcontext
 
 from functools import partial
 from typing import Any, Dict, Optional, Tuple, Union
@@ -16,6 +17,7 @@ import torchtune.modules.common_utils as common_utils
 from omegaconf import DictConfig, ListConfig
 
 from torch import nn
+from torch.amp import GradScaler
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader, DistributedSampler
 from torchtune import config, modules, training, utils
@@ -126,10 +128,13 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         self._dtype = training.get_dtype(cfg.dtype, device=self._device)
         # fp16 precision is explicitly disabled as it is not supported in this
         # recipe (for example, no gradient scaling).
-        if self._dtype == torch.float16:
-            raise ValueError(
-                "fp16 precision is not supported in this recipe. Please use fp32 or bf16."
-            )
+
+        # TODO: vbaddi: FIX ME
+        self._useautocast = True
+        # if self._dtype == torch.float16 and self._device != "qaic":
+        #     raise ValueError(
+        #         "fp16 precision is not supported in this recipe. Please use fp32 or bf16."
+        #     )
 
         # logging attributes
         self._output_dir = cfg.output_dir
@@ -253,7 +258,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         self._metric_logger.log_config(cfg)
 
         self._compile = cfg.compile
-        if cfg.device == "npu" and cfg.compile:
+        if cfg.device == ("npu" or "qaic") and cfg.compile:
             raise ValueError(
                 "NPU does not support model compilation. Please set `compile: False` in the config."
             )
@@ -508,6 +513,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         )
 
         log.info("Learning rate scheduler is initialized.")
+        log.info(f"Device type is {self._device.type}")
         return lr_scheduler
 
     def _setup_data(
@@ -633,7 +639,13 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         labels = batch.pop("labels")
         # run model
         with self.activations_handling_ctx:
-            logits = self._model(**batch)
+            with (
+                torch.autocast(device_type=self._device.type, dtype=torch.float16)
+                if self._device.type == "qaic"
+                else nullcontext()
+            ):
+                # log.info(f"Enabled Autocast for QAic {self._device.type} and {self._useautocast}")
+                logits = self._model(**batch)
 
         # Shift labels to compute loss
         # equivalent to doing labels[..., 1:] and logits[..., :-1, :]
@@ -666,6 +678,14 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         t0 = time.perf_counter()
         running_loss = 0
         num_tokens = 0
+
+        grad_scalar = False
+        if self._device.type == "qaic":
+            log.info(
+                "NOTE: torch.qaic is enabled and model is expected to be trained on fp16, enabling the GradScalar() computation"
+            )
+            scaler = GradScaler()
+            grad_scalar = True
 
         with self._profiler as prof:
             # self.epochs_run should be non-zero when we're resuming from a checkpoint
@@ -704,7 +724,10 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
                     # This way we can normalize by the total number of tokens if we're accumulating gradients
                     current_loss = self._loss_step(batch) * current_num_tokens
                     running_loss += current_loss
-                    current_loss.backward()
+                    if grad_scalar:
+                        scaler.scale(current_loss).backward()
+                    else:
+                        current_loss.backward()
 
                     # Step with optimizer
                     if (idx + 1) % self._gradient_accumulation_steps == 0:
@@ -714,7 +737,11 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
                                 self._model.parameters(),
                                 max_norm=float(self._clip_grad_norm),
                             )
-                        self._optimizer.step()
+                        if grad_scalar:
+                            scaler.step(self._optimizer)
+                            scaler.update()
+                        else:
+                            self._optimizer.step()
                         self._optimizer.zero_grad(set_to_none=True)
                         self._lr_scheduler.step()
                         # Update the number of steps when the weights are updated

@@ -263,6 +263,13 @@ def get_memory_stats(device: torch.device, reset_stats: bool = True) -> dict:
     if device.type == "cpu":
         raise ValueError("Logging memory stats is not supported on CPU devices")
 
+    if device.type == "qaic":
+        return {
+            "peak_memory_active": 0,
+            "peak_memory_alloc": 0,
+            "peak_memory_reserved": 0,
+        }
+
     torch_device = get_torch_device_namespace()
     peak_memory_active = torch_device.memory_stats().get("active_bytes.all.peak", 0) / (
         1024**3
