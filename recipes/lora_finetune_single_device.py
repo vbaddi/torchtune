@@ -129,7 +129,6 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         # recipe (for example, no gradient scaling).
 
         # TODO: vbaddi: FIX ME
-        self._useautocast = True
         # if self._dtype == torch.float16 and self._device != "qaic":
         #     raise ValueError(
         #         "fp16 precision is not supported in this recipe. Please use fp32 or bf16."
@@ -644,22 +643,26 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         with self.activations_handling_ctx:
             with (
                 torch.autocast(device_type=self._device.type, dtype=torch.float16)
-                if self._device.type == "qaic"
+                if self._dtype == torch.float16
                 else nullcontext()
             ):
-                # log.info(f"Enabled Autocast for QAic {self._device.type} and {self._useautocast}")
+                log.info(f"Enabled Autocast for {self._device.type}")
                 logits = self._model(**batch)
 
-        if self.linear_loss:
-            weight = self._model.linear_projection_weight
-            loss = self._loss_fn(weight, outputs, labels)
-        else:
-            labels = labels.reshape(-1)
-            outputs = outputs.reshape(-1, outputs.size(-1))
-            loss = self._loss_fn(outputs, labels)
+                # Shift labels to compute loss
+                # equivalent to doing labels[..., 1:] and logits[..., :-1, :]
+                # But this way we dont need to slice the logits. We just add an ignore index to labels.
+                labels = torch.hstack(
+                    (labels[..., 1:], self.ignore_labels_cache[: labels.shape[0]])
+                )
+                if not isinstance(logits, list):
+                    labels = labels.reshape(-1)
+                    logits = logits.reshape(-1, logits.size(-1))
 
-        # free outputs otherwise it peaks backward memory
-        del outputs
+                loss = self._loss_fn(logits, labels)
+
+        # free logits otherwise it peaks backward memory
+        del logits
 
         return loss
 
@@ -678,10 +681,14 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         running_loss = 0
         num_tokens = 0
 
+        for param in self._model.parameters():
+            if param.requires_grad:
+                param.data = param.data.float()
+
         grad_scalar = False
-        if self._device.type == "qaic":
+        if self._dtype == torch.float16:
             log.info(
-                "NOTE: torch.qaic is enabled and model is expected to be trained on fp16, enabling the GradScalar() computation"
+                "NOTE: Model is expected to be trained on fp16, enabling the GradScalar() computation"
             )
             scaler = GradScaler()
             grad_scalar = True
