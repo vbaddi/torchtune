@@ -18,6 +18,7 @@ from omegaconf import DictConfig, ListConfig
 
 from torch import nn
 from torch.optim import Optimizer
+from torch.qaic.amp import GradScaler as QAicGradScaler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torchdata.stateful_dataloader.sampler import StatefulDistributedSampler
 from torchtune import config, modules, training, utils
@@ -650,6 +651,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
                 if self._useautocast
                 else nullcontext()
             ):
+                #log.info(f"Enabled Autocast for {self._device.type}")
                 logits = self._model(**batch)
 
         # Shift labels to compute loss
@@ -683,6 +685,21 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         t0 = time.perf_counter()
         running_loss = 0
         num_tokens = 0
+
+        for param in self._model.parameters():
+            if param.requires_grad:
+                param.data = param.data.float()
+
+        grad_scalar = False
+        if self._dtype == torch.float16:
+            log.info(
+                "NOTE: Model is expected to be trained on fp16, enabling the GradScalar() computation"
+            )
+            if self._device.type.startswith("qaic"):
+                scaler = QAicGradScaler()
+            else:
+                scaler = GradScaler()
+            grad_scalar = True
 
         with self._profiler as prof:
             # self.epochs_run should be non-zero when we're resuming from a checkpoint
