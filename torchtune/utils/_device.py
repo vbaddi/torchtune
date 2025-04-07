@@ -44,7 +44,18 @@ def is_torch_npu_available() -> bool:
         return False
 
 
+def is_torch_qaic_available() -> bool:
+    """Check the availability of NPU"""
+    try:
+        import torch_qaic  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
 is_npu_available = is_torch_npu_available()
+is_qaic_available = is_torch_qaic_available()
 
 
 def _get_local_rank() -> Optional[int]:
@@ -102,6 +113,8 @@ def _get_device_type_from_env() -> str:
         device = "cuda"
     elif is_npu_available:
         device = "npu"
+    elif is_qaic_available:
+        device = "qaic"
     elif torch.xpu.is_available():
         device = "xpu"
     else:
@@ -125,7 +138,7 @@ def _validate_device_from_env(device: torch.device) -> None:
     """
     local_rank = _get_local_rank()
 
-    # Check if the device index is correct
+    '''# Check if the device index is correct
     if device.type != "cpu" and local_rank is not None:
         # Ensure device index matches assigned index when distributed training
         if device.index != local_rank:
@@ -133,6 +146,7 @@ def _validate_device_from_env(device: torch.device) -> None:
                 f"You can't specify a device index when using distributed training. "
                 f"Device specified is {device} but local rank is:{local_rank}"
             )
+    '''
 
     # Check if the device is available on this machine
     try:
@@ -199,10 +213,10 @@ Got key "{k}" with value of type {type(v)}"""
 class DeviceSupport(Enum):
     """
     This is a simple enum for compute devices,
-    This currently only supports CPU, CUDA, NPU, and XPU.
+    This currently only supports CPU, CUDA, NPU, XPU and QAic.
     The following enumeration defines various device configurations with attributes:
-    1. `device_type` (str): The type of device (e.g., "cpu", "cuda", "npu", "xpu").
-    2. `device_name` (str): A user-friendly name for the device (e.g., "CPU", "GPU", "NPU", "XPU").
+    1. `device_type` (str): The type of device (e.g., "cpu", "cuda", "npu", "xpu", "qaic").
+    2. `device_name` (str): A user-friendly name for the device (e.g., "CPU", "GPU", "NPU", "XPU", "QAIC").
     3. `communication_backend` (str): Specifies the backend used for communication on this device
     (e.g., "gloo", "nccl", "hccl", "ccl").
     """
@@ -211,6 +225,7 @@ class DeviceSupport(Enum):
     CUDA = ("cuda", "GPU", "nccl")
     NPU = ("npu", "NPU", "hccl")
     XPU = ("xpu", "XPU", "ccl")
+    QAIC = ("qaic", "QAIC", "gloo")
 
     def __init__(
         self,

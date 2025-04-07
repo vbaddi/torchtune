@@ -19,6 +19,7 @@ from omegaconf import DictConfig, ListConfig
 from torch import nn
 from torch.amp import GradScaler
 from torch.qaic.amp import GradScaler as QAicGradScaler
+from torch.distributed import destroy_process_group, init_process_group
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader, DistributedSampler
 from torchtune import config, modules, training, utils
@@ -134,7 +135,11 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
                 "fp16 precision is not supported in this recipe. Please use fp32 or bf16."
             )
         '''
+        
+        _, rank = utils.get_world_size_and_rank()
 
+        self._is_rank_zero = rank == 0
+        
         # logging attributes
         self._output_dir = cfg.output_dir
         self._log_every_n_steps = cfg.get("log_every_n_steps", 1)
@@ -251,10 +256,11 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         Setup the recipe state. This includes recipe state (if resume_from_checkpoint is True),
         model, tokenizer, loss, optimizer, learning rate scheduler, sampler, and dataloader.
         """
-        self._metric_logger = config.instantiate(cfg.metric_logger)
+        if self._is_rank_zero:
+            self._metric_logger = config.instantiate(cfg.metric_logger)
 
-        # log config with parameter override
-        self._metric_logger.log_config(cfg)
+            # log config with parameter override
+            self._metric_logger.log_config(cfg)
 
         self._compile = cfg.compile
         if cfg.device == ("npu" or "qaic")and cfg.compile:
@@ -282,7 +288,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         )
 
         self._tokenizer = config.instantiate(cfg.tokenizer)
-        log.info("Tokenizer is initialized from file.")
+        utils.log_rank_zero(log, "Tokenizer is initialized from file.")
 
         self._optimizer = self._setup_optimizer(
             cfg_optimizer=cfg.optimizer,
@@ -302,7 +308,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
             # set num_output_chunks for model
             self._model.set_num_output_chunks(self._loss_fn.num_output_chunks)
 
-        log.info("Loss is initialized.")
+        utils.log_rank_zero(log, "Loss is initialized.")
 
         # Dataloader depends on the tokenizer and loss_fn and should be
         # setup after all of these are setup
@@ -405,7 +411,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         profiler, profiler_cfg = config.instantiate(cfg_profiler)
 
-        log.info(f" Profiler config after instantiation: {profiler_cfg}")
+        utils.log_rank_zero(log, f" Profiler config after instantiation: {profiler_cfg}")
 
         self.profiler_profile_memory = profiler_cfg.get("profile_memory", False)
         if profiler_cfg["enabled"]:
@@ -481,11 +487,15 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
             model, enable_activation_offloading
         )
 
-        log.info(f"Model is initialized with precision {self._dtype}.")
+        utils.log_rank_zero(log, f"Model is initialized with precision {self._dtype}.")
 
-        if self._device.type != "cpu":
+        if self._is_rank_zero:
             memory_stats = training.get_memory_stats(device=self._device)
             training.log_memory_stats(memory_stats)
+            
+        # synchronize before training begins
+        torch.distributed.barrier()
+        
         return model
 
     def _setup_optimizer(
@@ -495,7 +505,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         if opt_state_dict:
             optimizer.load_state_dict(opt_state_dict)
 
-        log.info("Optimizer and loss are initialized.")
+        utils.log_rank_zero(log, "Optimizer and loss are initialized.")
         return optimizer
 
     def _setup_lr_scheduler(
@@ -511,8 +521,8 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
             last_epoch=last_epoch,
         )
 
-        log.info("Learning rate scheduler is initialized.")
-        log.info(f"Device type is {self._device.type}")
+        utils.log_rank_zero(log, "Learning rate scheduler is initialized.")
+        utils.log_rank_zero(log, f"Device type is {self._device.type}")
         return lr_scheduler
 
     def _setup_data(
@@ -527,6 +537,8 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         Map-style Datasets which fit into memory and an option for random shuffling.
         Samplers, iterable datasets, and streaming datasets are not supported.
         """
+        world_size, rank = utils.get_world_size_and_rank()
+        
         if isinstance(cfg_dataset, ListConfig):
             datasets = [
                 config.instantiate(single_cfg_dataset, self._tokenizer)
@@ -545,8 +557,8 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         sampler = DistributedSampler(
             ds,
-            num_replicas=1,
-            rank=0,
+            num_replicas=world_size,
+            rank=rank,
             shuffle=shuffle,
             seed=0,
         )
@@ -555,7 +567,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
             sampler=sampler,
             batch_size=batch_size,
             # dropping last avoids shape issues with compile + flex attention
-            drop_last=True,
+            #drop_last=True,
             collate_fn=(
                 partial(
                     collate_fn,
@@ -563,11 +575,13 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
                     ignore_idx=self._loss_fn.ignore_index,
                 )
                 if not packed
-                else padded_collate_packed
+                else partial(
+                    padded_collate_packed,
+                )
             ),
         )
 
-        log.info("Dataset and Sampler are initialized.")
+        utils.log_rank_zero(log, "Dataset and Sampler are initialized.")
 
         return sampler, dataloader
 
@@ -666,6 +680,10 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         """
         The core training loop.
         """
+        # clean up before training begins
+        #training.cleanup_before_training()
+
+        world_size, rank = utils.get_world_size_and_rank()
 
         if self._compile:
             log.info(
@@ -676,6 +694,8 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         t0 = time.perf_counter()
         running_loss = 0
         num_tokens = 0
+        
+        self._model = nn.parallel.DistributedDataParallel(self._model, device_ids=[torch.distributed.get_rank()])
         
         for param in self._model.parameters():
             if param.requires_grad:
@@ -699,7 +719,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
                 # in case shuffle is True
                 self._sampler.set_epoch(curr_epoch)
 
-                pbar = tqdm(total=self._steps_per_epoch)
+                pbar = tqdm(total=self._steps_per_epoch,  disable=not (rank == 0))
                 for idx, batch in enumerate(self._dataloader):
                     if (
                         self.max_steps_per_epoch is not None
@@ -710,7 +730,8 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
 
                     # Start tracking CUDA memory for active steps for just the first epoch
                     if (
-                        curr_epoch == 0
+                        self._is_rank_zero
+                        and curr_epoch == 0
                         and self.profiler_profile_memory
                         and idx == self.profiler_wait_steps + self.profiler_warmup_steps
                     ):
@@ -736,7 +757,12 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
 
                     # Step with optimizer
                     if (idx + 1) % self._gradient_accumulation_steps == 0:
-                        training.scale_grads(self._model, 1 / num_tokens)
+                        # Get total number of tokens across all ranks to normalize gradients
+                        torch.distributed.all_reduce(num_tokens)
+                        # This will ensure that the logged loss matches what we're optimizing
+                        torch.distributed.all_reduce(running_loss)
+
+                        training.scale_grads(self._model, world_size / num_tokens)
                         if self._clip_grad_norm is not None:
                             grad_norm = torch.nn.utils.clip_grad_norm_(
                                 self._model.parameters(),
@@ -759,12 +785,15 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
                         )
 
                         # Log per-step metrics
-                        if self.global_step % self._log_every_n_steps == 0:
+                        if (
+                            self.global_step % self._log_every_n_steps == 0
+                            and self._is_rank_zero
+                        ):
                             time_per_step = time.perf_counter() - t0
                             log_dict = {
                                 "loss": loss_to_log,
                                 "lr": self._optimizer.param_groups[0]["lr"],
-                                "tokens_per_second_per_gpu": num_tokens / time_per_step,
+                                "tokens_per_second_per_gpu": num_tokens / (time_per_step * world_size),
                             }
                             if (
                                 self._device.type == "cuda"
@@ -787,7 +816,8 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
 
                     # Stop tracking CUDA memory now that active steps are complete
                     if (
-                        curr_epoch == 0
+                        self._is_rank_zero
+                        and curr_epoch == 0
                         and self.profiler_profile_memory
                         and idx
                         == self.profiler_wait_steps
@@ -812,7 +842,9 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
                 )
 
     def cleanup(self) -> None:
-        self._metric_logger.close()
+        if self._is_rank_zero:
+            self._metric_logger.close()
+        destroy_process_group()
 
 
 @config.parse
@@ -824,6 +856,18 @@ def recipe_main(cfg: DictConfig) -> None:
         - Parameters specified in config (see available configs through ``tune ls``)
         - Overwritten by arguments from the command-line
     """
+    if not training.is_distributed():
+        raise RuntimeError(
+            "Distributed finetune recipe should be run via a distributed launcher."
+            "If using tune CLI, please specify --nnodes 1 and --nproc_per_node [num_gpus]"
+        )
+    init_process_group("qaic:qccl,cuda:gloo,cpu:gloo")
+    
+    device="qaic"
+    torch_device = torch.device(device)
+    getattr(torch, torch_device.type).set_device(torch.distributed.get_rank())
+    
+    
     config.log_config(recipe_name="LoRAFinetuneRecipeSingleDevice", cfg=cfg)
     recipe = LoRAFinetuneRecipeSingleDevice(cfg=cfg)
     recipe.setup(cfg=cfg)
