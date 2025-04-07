@@ -42,6 +42,35 @@ def llama3_2_1b(
         scale_factor=32,
         tie_word_embeddings=tie_word_embeddings,
     )
+
+def llama3_2_1b_pruned(
+    tie_word_embeddings: bool = True, intermediate_dim: int = 8192,
+) -> TransformerDecoder:
+    """
+    Builder for creating a Llama3.2 model initialized w/ the default 1b parameter values.
+
+    Args:
+        tie_word_embeddings (bool): whether the model's input and output word embeddings should be tied.
+        intermediate_dim (int): FFN layer intermediate dimension. Default is 8192.
+
+    Returns:
+        TransformerDecoder: Instantiation of Llama3.2 1B model
+    """
+    return llama3_2(
+        vocab_size=128_256,
+        num_layers=16,
+        num_heads=32,
+        num_kv_heads=8,
+        embed_dim=2048,
+        max_seq_len=131072,
+        intermediate_dim=intermediate_dim,
+        attn_dropout=0.0,
+        norm_eps=1e-5,
+        rope_base=500_000,
+        scale_factor=32,
+        tie_word_embeddings=tie_word_embeddings,
+    )
+
 def llama3_2_3b(
     tie_word_embeddings: bool = True,
 ) -> TransformerDecoder:
