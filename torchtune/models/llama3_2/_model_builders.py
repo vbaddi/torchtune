@@ -155,6 +155,68 @@ def lora_llama3_2_1b(
         quantize_base=quantize_base,
         tie_word_embeddings=tie_word_embeddings,
     )
+
+def lora_llama3_2_1b_pruned(
+    lora_attn_modules: List[LORA_ATTN_MODULES],
+    apply_lora_to_mlp: bool = False,
+    apply_lora_to_output: bool = False,
+    lora_rank: int = 8,
+    lora_alpha: float = 16,
+    lora_dropout: float = 0.0,
+    use_dora: bool = False,
+    quantize_base: bool = False,
+    tie_word_embeddings: bool = True,
+    intermediate_dim: int = 8192,
+) -> TransformerDecoder:
+    """
+    Builder for creating a Llama3.2 1B model with LoRA enabled.
+    The Llama3.2 defaults are the same as in :func:`~torchtune.models.llama3_2.llama3_2_1b`,
+    while LoRA default params are based on
+    https://github.com/tloen/alpaca-lora/blob/8bb8579e403dc78e37fe81ffbb253c413007323f/finetune.py#L41-L43.
+    
+    Args:
+        lora_attn_modules (List[LORA_ATTN_MODULES]): list of which linear layers
+            LoRA should be applied to in each self-attention block. Options are
+            ``{"q_proj", "k_proj", "v_proj", "output_proj"}``.
+        apply_lora_to_mlp (bool): whether to apply LoRA to the MLP in each transformer layer.
+            Default: False
+        apply_lora_to_output (bool): whether to apply LoRA to the model's final output projection.
+            Default: False
+        lora_rank (int): rank of each low-rank approximation
+        lora_alpha (float): scaling factor for the low-rank approximation
+        lora_dropout (float): dropout probability for the low-rank approximation
+        use_dora (bool): Decompose the LoRA weight into magnitude and direction, as
+            introduced in "DoRA: Weight-Decomposed Low-Rank Adaptation" (https://arxiv.org/abs/2402.09353).
+        quantize_base (bool): Whether to quantize base model weights
+        tie_word_embeddings (bool): whether the model's input and output word embeddings should be tied.
+        intermediate_dim (int): FFN layer intermediate dimension. Default is 8192.
+
+    Returns:
+        TransformerDecoder: Instantiation of Llama3.2 1B model with LoRA applied
+    """
+    return lora_llama3_2(
+        lora_attn_modules=lora_attn_modules,
+        apply_lora_to_mlp=apply_lora_to_mlp,
+        apply_lora_to_output=apply_lora_to_output,
+        vocab_size=128_256,
+        num_layers=16,
+        num_heads=32,
+        num_kv_heads=8,
+        embed_dim=2048,
+        max_seq_len=131072,
+        intermediate_dim=intermediate_dim,
+        attn_dropout=0.0,
+        norm_eps=1e-5,
+        rope_base=500_000,
+        scale_factor=32,
+        lora_rank=lora_rank,
+        lora_alpha=lora_alpha,
+        lora_dropout=lora_dropout,
+        use_dora=use_dora,
+        quantize_base=quantize_base,
+        tie_word_embeddings=tie_word_embeddings,
+    )
+    
 def lora_llama3_2_3b(
     lora_attn_modules: List[LORA_ATTN_MODULES],
     apply_lora_to_mlp: bool = False,

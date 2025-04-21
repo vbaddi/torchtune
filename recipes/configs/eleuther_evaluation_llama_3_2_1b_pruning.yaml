@@ -13,7 +13,7 @@ model:
 
 checkpointer:
   _component_: torchtune.training.FullModelHFCheckpointer
-  checkpoint_dir: /workspace/qeff_work/pruned_models/
+  checkpoint_dir: /workspace/qeff_work/torchtune/llama_3_2_1b_ffn_10%_pruned_pytorch_native
   checkpoint_files: [
     model_merged.pth,
   ]

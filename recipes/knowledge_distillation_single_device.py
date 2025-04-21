@@ -6,6 +6,7 @@
 
 import sys
 import time
+from contextlib import nullcontext
 
 from functools import partial
 from typing import Any, Dict, Optional, Union
@@ -16,6 +17,7 @@ import torchtune.modules.common_utils as common_utils
 from omegaconf import DictConfig, ListConfig
 
 from torch import nn
+from torch.amp import GradScaler
 from torch.optim import Optimizer
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torchdata.stateful_dataloader.sampler import StatefulDistributedSampler
@@ -110,11 +112,11 @@ class KDRecipeSingleDevice(FTRecipeInterface):
         self._dtype = training.get_dtype(cfg.dtype, device=self._device)
         # fp16 precision is explicitly disabled as it is not supported in this
         # recipe (for example, no gradient scaling).
-        if self._dtype == torch.float16:
+        '''if self._dtype == torch.float16:
             raise ValueError(
                 "fp16 precision is not supported in this recipe. Please use fp32 or bf16."
             )
-
+        '''
         # logging attributes
         self._output_dir = cfg.output_dir
         self._log_every_n_steps = cfg.get("log_every_n_steps", 1)
@@ -140,7 +142,8 @@ class KDRecipeSingleDevice(FTRecipeInterface):
         self._gradient_accumulation_steps = cfg.gradient_accumulation_steps
         self._clip_grad_norm = cfg.get("clip_grad_norm", None)
         self._kd_ratio = cfg.get("kd_ratio", 0.5)
-
+        log.info(f"Device type is {self._device.type}")
+        
     def load_checkpoint(self, cfg_checkpointer: DictConfig) -> Dict[str, Any]:
         """
         Extract the checkpoint state from file and validate. This includes the
@@ -227,9 +230,10 @@ class KDRecipeSingleDevice(FTRecipeInterface):
         self._metric_logger.log_config(cfg)
 
         self._compile = cfg.compile
-        if cfg.device == "npu" and cfg.compile:
+        if cfg.device == ("npu" or "qaic") and cfg.compile:
+        #if cfg.device == "npu" and cfg.compile:
             raise ValueError(
-                "NPU does not support model compilation. Please set `compile: False` in the config."
+                "NPU and QAIC do not support model compilation. Please set `compile: False` in the config."
             )
         checkpoint_dict = self.load_checkpoint(cfg_checkpointer=cfg.checkpointer)
         teacher_checkpoint_dict = self.load_teacher_checkpoint(
@@ -430,6 +434,10 @@ class KDRecipeSingleDevice(FTRecipeInterface):
         base_missing, base_unexpected = model.load_state_dict(
             base_model_state_dict, strict=False
         )
+        if cfg_model.tie_word_embeddings:
+            if 'output.weight' in base_unexpected:
+                base_unexpected.remove('output.weight')
+
         # This is for any adapters that need to be initialized after base weights
         # have been loaded (e.g. DoRA).
         if self._is_dora:
@@ -645,7 +653,12 @@ class KDRecipeSingleDevice(FTRecipeInterface):
         input_pos = batch.get("input_pos", None)  # shape [b, s]
 
         # run model
-        logits = self._model(tokens, mask=mask, input_pos=input_pos)
+        with (
+                torch.autocast(device_type=self._device.type, dtype=torch.float16)
+                if self._dtype == torch.float16
+                else nullcontext()
+            ):
+            logits = self._model(tokens, mask=mask, input_pos=input_pos)
 
         # Compute teacher logits
         with torch.no_grad():
@@ -690,6 +703,18 @@ class KDRecipeSingleDevice(FTRecipeInterface):
         running_kd_loss = 0
         num_tokens = 0
 
+        for param in self._model.parameters():
+            if param.requires_grad:
+                param.data = param.data.float()
+
+        grad_scalar = False
+        if self._dtype == torch.float16:
+            log.info(
+                "NOTE: Model is expected to be trained on fp16, enabling the GradScalar() computation"
+            )
+            scaler = torch.amp.GradScaler(self._device.type)
+            grad_scalar = True
+
         self._profiler.start()
         # self.epochs_run should be non-zero when we're resuming from a checkpoint
         for curr_epoch in range(self.epochs_run, self.total_epochs):
@@ -721,7 +746,10 @@ class KDRecipeSingleDevice(FTRecipeInterface):
                 current_loss = (
                     1 - self._kd_ratio
                 ) * class_loss + self._kd_ratio * kd_loss
-                current_loss.backward()
+                if grad_scalar:
+                    scaler.scale(current_loss).backward()
+                else:
+                    current_loss.backward()
 
                 # Step with optimizer
                 if (idx + 1) % self._gradient_accumulation_steps == 0:
@@ -731,7 +759,11 @@ class KDRecipeSingleDevice(FTRecipeInterface):
                             self._model.parameters(),
                             max_norm=float(self._clip_grad_norm),
                         )
-                    self._optimizer.step()
+                    if grad_scalar:
+                        scaler.step(self._optimizer)
+                        scaler.update()
+                    else:
+                        self._optimizer.step()
                     self._optimizer.zero_grad(set_to_none=True)
                     self._lr_scheduler.step()
                     # Update the number of steps when the weights are updated

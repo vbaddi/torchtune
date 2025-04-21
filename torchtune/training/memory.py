@@ -272,16 +272,21 @@ def get_memory_stats(device: torch.device, reset_stats: bool = True) -> dict:
             "peak_memory_alloc": 0,
             "peak_memory_reserved": 0,
         }
-
-    torch_device = get_torch_device_namespace()
-    peak_memory_active = torch_device.memory_stats().get("active_bytes.all.peak", 0) / (
-        1024**3
-    )
-    peak_mem_alloc = torch_device.max_memory_allocated(device) / (1024**3)
-    peak_mem_reserved = torch_device.max_memory_reserved(device) / (1024**3)
-    if reset_stats:
-        torch_device.reset_peak_memory_stats(device)
-
+    else:
+        torch_device = get_torch_device_namespace()
+        peak_memory_active = (
+            torch_device.memory_stats().get("active_bytes.all.peak", 0) / _BYTES_IN_GIB
+        )
+        peak_memory_alloc = torch_device.max_memory_allocated(device) / _BYTES_IN_GIB
+        peak_memory_reserved = torch_device.max_memory_reserved(device) / _BYTES_IN_GIB
+        memory_stats = {
+            "peak_memory_active": peak_memory_active,
+            "peak_memory_alloc": peak_memory_alloc,
+            "peak_memory_reserved": peak_memory_reserved,
+        }
+        if reset_stats:
+            torch_device.reset_peak_memory_stats(device)
+    
     return memory_stats
 
 

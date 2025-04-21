@@ -6,6 +6,7 @@
 
 import sys
 import time
+from contextlib import nullcontext
 
 from functools import partial
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -111,10 +112,10 @@ class KDRecipeDistributed(FTRecipeInterface):
         self._dtype = training.get_dtype(cfg.dtype, device=self._device)
         # fp16 precision is explicitly disabled as it is not supported in this
         # recipe (for example, no gradient scaling).
-        if self._dtype == torch.float16:
-            raise ValueError(
-                "fp16 precision is not supported in this recipe. Please use fp32 or bf16."
-            )
+        # if self._dtype == torch.float16:
+        #     raise ValueError(
+        #         "fp16 precision is not supported in this recipe. Please use fp32 or bf16."
+        #     )
 
         self.world_size, self.rank = utils.get_world_size_and_rank()
 
@@ -142,6 +143,7 @@ class KDRecipeDistributed(FTRecipeInterface):
         self._save_adapter_weights_only = cfg.get("save_adapter_weights_only", False)
         self._gradient_accumulation_steps = cfg.gradient_accumulation_steps
         self._kd_ratio = cfg.get("kd_ratio", 0.5)
+        log.info(f"Device type: {self._device.type}")
 
     def load_checkpoint(self, cfg_checkpointer: DictConfig) -> Dict[str, Any]:
         """
@@ -778,8 +780,13 @@ class KDRecipeDistributed(FTRecipeInterface):
         mask = batch.get("mask", None)  # shape [b, s, s]
         input_pos = batch.get("input_pos", None)  # shape [b, s]
 
-        # run model
-        logits = self._model(tokens, mask=mask, input_pos=input_pos)
+        with (
+            torch.autocast(device_type=self._device.type, dtype=torch.float16)
+            if self._dtype == torch.float16
+            else nullcontext()
+        ):
+            # run model
+            logits = self._model(tokens, mask=mask, input_pos=input_pos)
 
         # Shift labels to compute loss
         # equivalent to doing labels[..., 1:] and logits[..., :-1, :]
@@ -823,6 +830,18 @@ class KDRecipeDistributed(FTRecipeInterface):
         running_kd_loss = 0
         num_tokens = 0
 
+        for param in self._model.parameters():
+            if param.requires_grad:
+                param.data = param.data.float()
+
+        grad_scalar = False
+        if self._dtype == torch.float16:
+            log.info(
+                "NOTE: Model is expected to be trained on fp16, enabling the GradScalar() computation"
+            )
+            scaler = torch.amp.GradScaler(self._device.type)
+            grad_scalar = True
+
         self._profiler.start()
         # self.epochs_run should be non-zero when we're resuming from a checkpoint
         for curr_epoch in range(self.epochs_run, self.total_epochs):
@@ -864,7 +883,10 @@ class KDRecipeDistributed(FTRecipeInterface):
                 current_loss = (
                     1 - self._kd_ratio
                 ) * class_loss + self._kd_ratio * kd_loss
-                current_loss.backward()
+                if grad_scalar:
+                    scaler.scale(current_loss).backward()
+                else:
+                    current_loss.backward()
 
                 # Step with optimizer
                 if (idx + 1) % self._gradient_accumulation_steps == 0:
@@ -878,7 +900,11 @@ class KDRecipeDistributed(FTRecipeInterface):
                     training.scale_grads(self._model, self.world_size / num_tokens)
                     class_loss_to_log = running_class_loss.item() / num_tokens
                     kd_loss_to_log = running_kd_loss.item() / num_tokens
-                    self._optimizer.step()
+                    if grad_scalar:
+                        scaler.step(self._optimizer)
+                        scaler.update()
+                    else:
+                        self._optimizer.step()
                     self._optimizer.zero_grad(set_to_none=True)
                     self._lr_scheduler.step()
                     # Update the number of steps when the weights are updated

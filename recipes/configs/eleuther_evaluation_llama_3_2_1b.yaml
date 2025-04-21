@@ -28,9 +28,11 @@ tokenizer:
 device: cuda
 dtype: fp16
 seed: 1234 # It is not recommended to change this seed, b/c it matches EleutherAI's default seed
+log_level: DEBUG
 
 # EleutherAI specific eval args
 tasks: ["truthfulqa_mc2", "gsm8k", "hellaswag", "wikitext", "arc_challenge", "humaneval", "mgsm_direct_en", "mmlu", "squadv2", "winogrande"]
+# tasks: ["mmlu"]
 limit: null
 max_seq_length: 4096
 batch_size: 1
