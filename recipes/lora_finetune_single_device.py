@@ -129,7 +129,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         self._dtype = training.get_dtype(cfg.dtype, device=self._device)
         # fp16 precision is explicitly disabled as it is not supported in this
         # recipe (for example, no gradient scaling).
-        if self._dtype == torch.float16 and self._device != "qaic":
+        if self._dtype == torch.float16 and self._device.type != "qaic":
             raise ValueError(
                 "fp16 precision is not supported in this recipe. Please use fp32 or bf16."
             )
