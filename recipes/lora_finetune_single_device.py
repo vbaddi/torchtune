@@ -517,7 +517,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
             last_epoch=last_epoch,
         )
 
-        self._logger.info("Learning rate scheduler is initialized.")
+        log.info("Learning rate scheduler is initialized.")
         return lr_scheduler
 
     def _setup_data(
@@ -648,18 +648,16 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
             autocast_ctx = nullcontext()
         with self.activations_handling_ctx:
             with autocast_ctx:
-                outputs = self._model(**batch)
+                logits = self._model(**batch)
 
-        if self.linear_loss:
-            weight = self._model.linear_projection_weight
-            loss = self._loss_fn(weight, outputs, labels)
-        else:
+        if not isinstance(logits, list):
             labels = labels.reshape(-1)
-            outputs = outputs.reshape(-1, outputs.size(-1))
-            loss = self._loss_fn(outputs, labels)
+            logits = logits.reshape(-1, logits.size(-1))
 
-        # free outputs otherwise it peaks backward memory
-        del outputs
+        loss = self._loss_fn(logits, labels)
+
+        # free logits otherwise it peaks backward memory
+        del logits
 
         return loss
 
