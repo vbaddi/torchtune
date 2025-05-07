@@ -130,12 +130,10 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         # fp16 precision is explicitly disabled as it is not supported in this
         # recipe (for example, no gradient scaling).
 
-        # TODO: vbaddi: FIX ME
-        self._useautocast = True
-        # if self._dtype == torch.float16 and self._device != "qaic":
-        #     raise ValueError(
-        #         "fp16 precision is not supported in this recipe. Please use fp32 or bf16."
-        #     )
+        if self._dtype == torch.float16 and self._device != "qaic":
+            raise ValueError(
+                "fp16 precision is not supported in this recipe. Please use fp32 or bf16."
+            )
 
         # logging attributes
         self._output_dir = cfg.output_dir
@@ -263,7 +261,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         self._compile = cfg.compile
         if cfg.device == ("npu" or "qaic") and cfg.compile:
             raise ValueError(
-                "NPU does not support model compilation. Please set `compile: False` in the config."
+                "NPU and QAIC do not support model compilation. Please set `compile: False` in the config."
             )
         checkpoint_dict = self.load_checkpoint(cfg_checkpointer=cfg.checkpointer)
 
@@ -520,7 +518,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
             last_epoch=last_epoch,
         )
 
-        log.info("Learning rate scheduler is initialized.")
+        self._logger.info("Learning rate scheduler is initialized.")
         return lr_scheduler
 
     def _setup_data(
@@ -645,29 +643,25 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         # Shape [b, s], needed for the loss not the model
         labels = batch.pop("labels")
         # run model
+        
+        if self._device.type == "qaic" and self._dtype == torch.float16:
+            autocast_ctx = torch.autocast(device_type=self._device.type, dtype=torch.float16)
+        else:
+            autocast_ctx = nullcontext()
         with self.activations_handling_ctx:
-            with (
-                torch.autocast(device_type=self._device, dtype=torch.float16)
-                if self._useautocast
-                else nullcontext()
-            ):
-                #log.info(f"Enabled Autocast for {self._device.type}")
-                logits = self._model(**batch)
+            with autocast_ctx:
+                outputs = self._model(**batch)
 
-        # Shift labels to compute loss
-        # equivalent to doing labels[..., 1:] and logits[..., :-1, :]
-        # But this way we dont need to slice the logits. We just add an ignore index to labels.
-        labels = torch.hstack(
-            (labels[..., 1:], self.ignore_labels_cache[: labels.shape[0]])
-        )
-        if not isinstance(logits, list):
+        if self.linear_loss:
+            weight = self._model.linear_projection_weight
+            loss = self._loss_fn(weight, outputs, labels)
+        else:
             labels = labels.reshape(-1)
-            logits = logits.reshape(-1, logits.size(-1))
+            outputs = outputs.reshape(-1, outputs.size(-1))
+            loss = self._loss_fn(outputs, labels)
 
-        loss = self._loss_fn(logits, labels)
-
-        # free logits otherwise it peaks backward memory
-        del logits
+        # free outputs otherwise it peaks backward memory
+        del outputs
 
         return loss
 
@@ -692,7 +686,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         grad_scalar = False
         if self._dtype == torch.float16:
-            log.info(
+            self._logger.info(
                 "NOTE: Model is expected to be trained on fp16, enabling the GradScalar() computation"
             )
             if self._device.type.startswith("qaic"):

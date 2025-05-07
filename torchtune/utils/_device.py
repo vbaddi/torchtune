@@ -232,6 +232,7 @@ class DeviceSupport(Enum):
     CUDA = ("cuda", "GPU", "nccl")
     NPU = ("npu", "NPU", "hccl")
     XPU = ("xpu", "XPU", "ccl")
+    MPS = ("mps", "MPS", "gloo")
     QAIC = ("qaic", "QAIC", "gloo")
 
     def __init__(
