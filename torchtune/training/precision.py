@@ -10,7 +10,7 @@ from typing import Dict, Generator, Iterable, List, Optional, Tuple
 import torch
 
 from torchtune.utils import get_logger
-from torchtune.utils._device import is_npu_available
+from torchtune.utils._device import is_npu_available, is_qaic_available  # noqa: F401
 
 log = get_logger()
 
