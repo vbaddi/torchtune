@@ -689,7 +689,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         grad_scalar = False
         if self._dtype == torch.float16:
-            self._logger.info(
+            log.info(
                 "NOTE: Model is expected to be trained on fp16, enabling the GradScalar() computation"
             )
             if self._device.type.startswith("qaic"):
