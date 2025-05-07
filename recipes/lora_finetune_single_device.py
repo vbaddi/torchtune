@@ -129,7 +129,6 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         self._dtype = training.get_dtype(cfg.dtype, device=self._device)
         # fp16 precision is explicitly disabled as it is not supported in this
         # recipe (for example, no gradient scaling).
-
         if self._dtype == torch.float16 and self._device != "qaic":
             raise ValueError(
                 "fp16 precision is not supported in this recipe. Please use fp32 or bf16."
@@ -642,8 +641,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
     def _loss_step(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         # Shape [b, s], needed for the loss not the model
         labels = batch.pop("labels")
-        # run model
-        
+        # run model        
         if self._device.type == "qaic" and self._dtype == torch.float16:
             autocast_ctx = torch.autocast(device_type=self._device.type, dtype=torch.float16)
         else:
