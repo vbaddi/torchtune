@@ -18,6 +18,7 @@ from omegaconf import DictConfig, ListConfig
 
 from torch import nn
 from torch.optim import Optimizer
+from torch.amp import GradScaler
 from torch.qaic.amp import GradScaler as QAicGradScaler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torchdata.stateful_dataloader.sampler import StatefulDistributedSampler
@@ -641,7 +642,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
     def _loss_step(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         # Shape [b, s], needed for the loss not the model
         labels = batch.pop("labels")
-        # run model        
+        # run model
         if self._device.type == "qaic" and self._dtype == torch.float16:
             autocast_ctx = torch.autocast(device_type=self._device.type, dtype=torch.float16)
         else:
@@ -726,7 +727,10 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
                     # This way we can normalize by the total number of tokens if we're accumulating gradients
                     current_loss = self._loss_step(batch) * current_num_tokens
                     running_loss += current_loss
-                    current_loss.backward()
+                    if grad_scalar:
+                        scaler.scale(current_loss).backward()
+                    else:
+                        current_loss.backward()
 
                     # Step with optimizer
                     if (idx + 1) % self._gradient_accumulation_steps == 0:
@@ -736,7 +740,11 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
                                 self._model.parameters(),
                                 max_norm=float(self._clip_grad_norm),
                             )
-                        self._optimizer.step()
+                        if grad_scalar:
+                            scaler.step(self._optimizer)
+                            scaler.update()
+                        else:
+                            self._optimizer.step()
                         self._optimizer.zero_grad(set_to_none=True)
                         self._lr_scheduler.step()
                         # Update the number of steps when the weights are updated
