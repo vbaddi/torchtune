@@ -9,13 +9,13 @@ from enum import Enum
 from typing import Optional, Tuple
 
 import torch
-
+from packaging import version
 from torchtune.utils._import_guard import _SUPPORTS_FLEX_ATTENTION
 from torchtune.utils._logging import get_logger
 
 logger = get_logger("DEBUG")
 
-if _SUPPORTS_FLEX_ATTENTION:
+if _SUPPORTS_FLEX_ATTENTION and version.parse(torch.__version__) >= version.Version('2.5.0'):
     from torch.nn.attention.flex_attention import BlockMask
 else:
     BlockMask = torch.Tensor

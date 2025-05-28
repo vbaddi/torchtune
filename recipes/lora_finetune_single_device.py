@@ -19,7 +19,6 @@ from omegaconf import DictConfig, ListConfig
 from torch import nn
 from torch.optim import Optimizer
 from torch.amp import GradScaler
-from torch.qaic.amp import GradScaler as QAicGradScaler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torchdata.stateful_dataloader.sampler import StatefulDistributedSampler
 from torchtune import config, modules, training, utils
@@ -694,7 +693,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
                 "NOTE: Model is expected to be trained on fp16, enabling the GradScalar() computation"
             )
             if self._device.type.startswith("qaic"):
-                scaler = QAicGradScaler()
+                scaler = torch.qaic.amp.GradScaler()
             else:
                 scaler = GradScaler()
             grad_scalar = True

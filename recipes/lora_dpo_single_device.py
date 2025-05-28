@@ -10,10 +10,11 @@ import time
 from functools import partial
 from typing import Any, Dict, Optional, Tuple
 from warnings import warn
+from contextlib import nullcontext
 
 import torch
 from omegaconf import DictConfig, ListConfig
-
+from torch.amp import GradScaler
 from torch import nn
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader, DistributedSampler
@@ -89,7 +90,7 @@ class LoRADPORecipeSingleDevice(FTRecipeInterface):
 
         # fp16 precision is explicitly disabled as it is not supported in this
         # recipe (for example, no gradient scaling).
-        if self._dtype == torch.float16:
+        if self._dtype == torch.float16 and self._device.type != "qaic":
             raise ValueError(
                 "fp16 precision is not supported in this recipe. Please use fp32 or bf16."
             )
@@ -491,8 +492,13 @@ class LoRADPORecipeSingleDevice(FTRecipeInterface):
         # formed by concatenating an equal number of "chosen" and "rejected".
         len_chosen = concatenated_input_ids.shape[0] // 2
 
+        if self._device.type == "qaic" and self._dtype == torch.float16:
+            autocast_ctx = torch.autocast(device_type=self._device.type, dtype=torch.float16)
+        else:
+            autocast_ctx = nullcontext()
         with self.activations_handling_ctx:
-            all_logits = model(concatenated_input_ids)
+            with autocast_ctx:
+                all_logits = model(concatenated_input_ids)
 
         all_log_probs = rlhf.get_batch_log_probs(all_logits, concatenated_labels)
 
@@ -519,6 +525,21 @@ class LoRADPORecipeSingleDevice(FTRecipeInterface):
         t0 = time.perf_counter()
         running_loss = 0
         num_tokens = 0
+
+        for param in self._model.parameters():
+            if param.requires_grad:
+                param.data = param.data.float()
+
+        grad_scalar = False
+        if self._dtype == torch.float16:
+            log.info(
+                "NOTE: Model is expected to be trained on fp16, enabling the GradScalar() computation"
+            )
+            if self._device.type.startswith("qaic"):
+                scaler = torch.qaic.amp.GradScaler()
+            else:
+                scaler = GradScaler()
+            grad_scalar = True
 
         # self.epochs_run should be non-zero when we're resuming from a checkpoint
         for curr_epoch in range(self.epochs_run, self.total_epochs):
@@ -566,11 +587,18 @@ class LoRADPORecipeSingleDevice(FTRecipeInterface):
 
                 loss = loss / self._gradient_accumulation_steps
                 running_loss += loss
-                loss.backward()
+                if grad_scalar:
+                    scaler.scale(loss).backward()
+                else:
+                   loss.backward()
 
                 # Step with optimizer
                 if (idx + 1) % self._gradient_accumulation_steps == 0:
-                    self._optimizer.step()
+                    if grad_scalar:
+                        scaler.step(self._optimizer)
+                        scaler.update()
+                    else:
+                        self._optimizer.step()
                     self._optimizer.zero_grad(set_to_none=True)
 
                     if self._lr_scheduler is not None:

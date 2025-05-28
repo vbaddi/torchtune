@@ -8,14 +8,14 @@ import logging
 from typing import Callable, List, Optional, Union
 
 import torch
-
+from packaging import version
 from torch import nn
 from torchtune.utils._import_guard import _SUPPORTS_FLEX_ATTENTION
 from torchtune.utils._logging import get_logger, log_once
 
 _log: logging.Logger = get_logger()
 
-if _SUPPORTS_FLEX_ATTENTION:
+if _SUPPORTS_FLEX_ATTENTION and version.parse(torch.__version__) >= version.Version('2.5.0'):
     from torch.nn.attention.flex_attention import (
         BlockMask,
         create_block_mask as create_block_causal_mask_flex,
@@ -148,7 +148,7 @@ def packed_block_causal_mask(
     Returns:
         _MaskType: BlockMask or Tensor if torch version < 2.5.0.
     """
-    if _SUPPORTS_FLEX_ATTENTION:
+    if _SUPPORTS_FLEX_ATTENTION and version.parse(torch.__version__) >= version.Version('2.5.0'):
         document_ids = _get_document_ids_from_seq_lens(seq_lens)
         batch_size, max_seq_len = document_ids.shape
         document_ids = document_ids.to("cuda")
@@ -192,7 +192,7 @@ def _sdpa_or_flex_attention() -> Callable:
     - torch.cuda.get_device_capability() >= (7, 5)
     """
 
-    if _SUPPORTS_FLEX_ATTENTION:
+    if _SUPPORTS_FLEX_ATTENTION and version.parse(torch.__version__) >= version.Version('2.5.0'):
 
         def _attention_call(
             q: torch.Tensor,
